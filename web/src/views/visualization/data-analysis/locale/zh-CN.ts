@@ -1,0 +1,16 @@
+export default {
+  'menu.visualization.dataAnalysis': '装备租赁分析',
+  'dataAnalysis.title.publicOpinion': '租赁数据分析',
+  'dataAnalysis.card.title.allVisitors': '租赁订单总数',
+  'dataAnalysis.card.title.contentPublished': '装备出库量',
+  'dataAnalysis.card.title.totalComment': '在租装备数',
+  'dataAnalysis.card.title.totalShare': '归还装备数',
+  'dataAnalysis.card.yesterday': '较昨日',
+  'dataAnalysis.contentPublishRatio': '装备类型租赁比例',
+  'dataAnalysis.popularAuthor': '热门租赁装备榜单',
+  'dataAnalysis.popularAuthor.column.ranking': '排名',
+  'dataAnalysis.popularAuthor.column.author': '装备名称',
+  'dataAnalysis.popularAuthor.column.content': '租赁次数',
+  'dataAnalysis.popularAuthor.column.click': '租赁天数',
+  'dataAnalysis.contentPeriodAnalysis': '租赁时段分析',
+};

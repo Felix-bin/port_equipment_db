@@ -1,0 +1,15 @@
+export default {
+  'menu.visualization.multiDimensionDataAnalysis': '多维数据分析',
+  'multiDAnalysis.card.title.dataOverview': '数据总览',
+  'multiDAnalysis.dataOverview.contentProduction': '装备入库量',
+  'multiDAnalysis.dataOverview.contentClick': '装备租赁量',
+  'multiDAnalysis.dataOverview.contentExposure': '装备利用率',
+  'multiDAnalysis.dataOverview.activeUsers': '活跃租户数',
+  'multiDAnalysis.card.title.userActions': '今日租赁业务统计',
+  'multiDAnalysis.card.title.contentTypeDistribution': '装备类型分布',
+  'multiDAnalysis.card.title.retentionTrends': '客户留存趋势',
+  'multiDAnalysis.card.title.userRetention': '客户留存量',
+  'multiDAnalysis.card.title.contentConsumptionTrends': '装备使用趋势',
+  'multiDAnalysis.card.title.contentConsumption': '装备使用量',
+  'multiDAnalysis.card.title.contentPublishingSource': '租赁订单来源',
+};
