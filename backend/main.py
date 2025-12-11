@@ -56,6 +56,147 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     return crud.get_dashboard_stats(db)
 
 
+@app.get("/api/content-data", tags=["Dashboard"])
+def get_content_data(db: Session = Depends(get_db)):
+    """获取租赁数据趋势图表数据（最近7天）"""
+    from datetime import timedelta
+    
+    today = date.today()
+    chart_data = []
+    
+    # 统计最近7天的租赁订单数量
+    for i in range(6, -1, -1):
+        day_date = today - timedelta(days=i)
+        
+        # 统计当天创建的租赁订单数量
+        count = db.query(func.count(models.LeaseOrder.order_id)).filter(
+            models.LeaseOrder.is_deleted == 0,
+            func.date(models.LeaseOrder.created_at) == day_date
+        ).scalar() or 0
+        
+        # 格式化日期为 MM-DD
+        date_str = day_date.strftime('%m-%d')
+        
+        chart_data.append({
+            "x": date_str,
+            "y": count
+        })
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": chart_data
+    }
+
+
+@app.get("/api/popular/list", tags=["Dashboard"])
+def get_popular_list(
+    type: Optional[str] = Query(None, description="装备类型过滤"),
+    db: Session = Depends(get_db)
+):
+    """获取热门装备列表（按租赁次数统计）"""
+    from datetime import timedelta
+    
+    # 获取最近30天的日期范围
+    today = date.today()
+    thirty_days_ago = today - timedelta(days=30)
+    
+    # 统计每个装备的租赁次数（基于订单明细）
+    query = db.query(
+        models.Equipment.equipment_name,
+        models.Equipment.equipment_code,
+        models.Equipment.category,
+        func.count(models.OrderItem.item_id).label('rental_count')
+    ).join(
+        models.OrderItem,
+        models.Equipment.equipment_id == models.OrderItem.equipment_id
+    ).join(
+        models.LeaseOrder,
+        models.OrderItem.order_id == models.LeaseOrder.order_id
+    ).filter(
+        models.Equipment.is_deleted == 0,
+        models.LeaseOrder.is_deleted == 0,
+        models.LeaseOrder.created_at >= thirty_days_ago
+    ).group_by(
+        models.Equipment.equipment_id,
+        models.Equipment.equipment_name,
+        models.Equipment.equipment_code,
+        models.Equipment.category
+    )
+    
+    # 如果有类型过滤（匹配类型关键词）
+    if type:
+        # 支持多种关键词匹配
+        type_keywords = {
+            'crane': ['起重机', '吊机', 'crane'],
+            'forklift': ['叉车', 'forklift'],
+            'container': ['集装箱', 'container', '箱'],
+            'pallet': ['托盘', 'pallet'],
+            'truck': ['货车', '卡车', 'truck'],
+        }
+        
+        keywords = type_keywords.get(type.lower(), [type])
+        or_conditions = [models.Equipment.category.contains(kw) for kw in keywords]
+        from sqlalchemy import or_
+        query = query.filter(or_(*or_conditions))
+    
+    # 按租赁次数降序排列，获取前10名
+    results = query.order_by(func.count(models.OrderItem.item_id).desc()).limit(10).all()
+    
+    # 格式化结果
+    data = []
+    for idx, (equipment_name, equipment_code, category, rental_count) in enumerate(results, start=1):
+        # 计算增长率（与前一天对比）
+        yesterday = today - timedelta(days=1)
+        yesterday_count = db.query(func.count(models.OrderItem.item_id)).join(
+            models.Equipment,
+            models.OrderItem.equipment_id == models.Equipment.equipment_id
+        ).join(
+            models.LeaseOrder,
+            models.OrderItem.order_id == models.LeaseOrder.order_id
+        ).filter(
+            models.Equipment.equipment_name == equipment_name,
+            models.LeaseOrder.is_deleted == 0,
+            func.date(models.LeaseOrder.created_at) == yesterday
+        ).scalar() or 0
+        
+        # 计算增长率
+        if yesterday_count > 0:
+            increases = round(((rental_count - yesterday_count) / yesterday_count) * 100, 1)
+        else:
+            increases = 100.0 if rental_count > 0 else 0.0
+        
+        data.append({
+            "key": idx,
+            "title": f"{equipment_name} ({equipment_code})",
+            "clickNumber": str(rental_count),
+            "increases": increases,
+        })
+    
+    # 如果没有租赁数据，显示所有装备
+    if not data:
+        all_equipment = db.query(
+            models.Equipment.equipment_name,
+            models.Equipment.equipment_code
+        ).filter(
+            models.Equipment.is_deleted == 0
+        ).limit(10).all()
+        
+        for idx, (equipment_name, equipment_code) in enumerate(all_equipment, start=1):
+            data.append({
+                "key": idx,
+                "title": f"{equipment_name} ({equipment_code})",
+                "clickNumber": "0",
+                "increases": 0.0,
+            })
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": data
+    }
+
+
 # ========== 租赁分析统计 ==========
 @app.get("/api/rental/analysis", response_model=schemas.RentalAnalysisStats, tags=["Rental"])
 def get_rental_analysis(db: Session = Depends(get_db)):
@@ -140,42 +281,38 @@ def list_equipment_inventory(
     status: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """获取设备库存列表"""
+    """获取设备库存列表（使用视图优化）"""
     skip = (current - 1) * pageSize
+    # 使用视图优化查询，包含租赁统计信息
     result = crud.get_equipment_list(
         db, skip=skip, limit=pageSize,
-        keyword=keyword, category=equipmentType, status=status
+        keyword=keyword, category=equipmentType, status=status,
+        use_view=True  # 启用视图优化
     )
     
     # 转换为前端期望的格式
     items = []
     for item in result["items"]:
-        # 转换状态
-        if item.status.value == "在库":
-            display_status = "available"
-        elif item.status.value == "已出库":
-            display_status = "rented"
-        elif item.status.value == "维修中":
-            display_status = "maintenance"
-        else:
-            display_status = "maintenance"
-        
         items.append({
-            "id": str(item.equipment_id),
-            "equipmentCode": item.equipment_code,
-            "equipmentName": item.equipment_name,
-            "equipmentType": item.category,
+            "id": str(item['equipment_id']),
+            "equipmentCode": item['equipment_code'],
+            "equipmentName": item['equipment_name'],
+            "equipmentType": item['category'],
             "totalQuantity": 1,
-            "availableQuantity": 1 if item.status.value == "在库" else 0,
-            "rentedQuantity": 1 if item.status.value == "已出库" else 0,
-            "warehouse": item.storage_location or "",
-            "location": item.storage_location or "",
-            "status": display_status,
-            "dailyRate": float(item.daily_rental_rate) if item.daily_rental_rate else 0,
-            "purchaseDate": item.purchase_date.strftime("%Y-%m-%d") if item.purchase_date else None,
-            "inboundDate": item.created_at.strftime("%Y-%m-%d") if item.created_at else None,
-            "supplier": item.supplier or "",
-            "specifications": item.specifications or ""
+            "availableQuantity": item['available_quantity'],
+            "rentedQuantity": item['rented_quantity'],
+            "warehouse": item['storage_location'] or "",
+            "location": item['storage_location'] or "",
+            "status": item['display_status'],
+            "dailyRate": item['daily_rental_rate'],
+            "purchaseDate": item['purchase_date'].strftime("%Y-%m-%d") if item['purchase_date'] else None,
+            "inboundDate": item['created_at'].strftime("%Y-%m-%d") if item['created_at'] else None,
+            "supplier": item['supplier'],
+            "specifications": item['specifications'],
+            # 新增：租赁统计信息
+            "rentalCount": item['rental_count'],
+            "totalRentalDays": item['total_rental_days'],
+            "totalRevenue": item['total_revenue']
         })
     
     return {
@@ -560,8 +697,7 @@ def create_equipment_outbound(data: dict, db: Session = Depends(get_db)):
     )
     db.add(outbound_item)
     
-    # 更新设备状态为已出库
-    equipment.status = models.EquipmentStatus.OUT
+    # 触发器 trg_outbound_record_created 会自动更新设备状态为"已出库"
     db.commit()
     db.refresh(outbound_record)
     
@@ -670,18 +806,33 @@ def list_customers(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     keyword: Optional[str] = None,
+    credit_rating: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """获取客户列表"""
+    """获取客户列表（使用视图优化，包含租赁统计信息）"""
     skip = (page - 1) * page_size
-    result = crud.get_customer_list(db, skip=skip, limit=page_size, keyword=keyword)
-    
-    return schemas.PageResponse(
-        data=[schemas.Customer.from_orm(item) for item in result["items"]],
-        total=result["total"],
-        page=page,
-        page_size=page_size
+    # 使用视图优化查询
+    result = crud.get_customer_list(
+        db, skip=skip, limit=page_size, 
+        keyword=keyword, use_view=True
     )
+    
+    # 如果使用视图，返回包含统计信息的字典格式
+    if result.get("items") and isinstance(result["items"][0], dict):
+        return {
+            "data": result["items"],
+            "total": result["total"],
+            "page": page,
+            "page_size": page_size
+        }
+    else:
+        # 兼容原有格式
+        return schemas.PageResponse(
+            data=[schemas.Customer.from_orm(item) for item in result["items"]],
+            total=result["total"],
+            page=page,
+            page_size=page_size
+        )
 
 
 @app.post("/api/customers", response_model=schemas.Customer, tags=["Customer"])
@@ -699,19 +850,62 @@ def list_orders(
     keyword: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    """获取订单列表"""
+    """获取订单列表（使用视图优化，包含客户、账单、归还等关联信息）"""
     skip = (page - 1) * page_size
+    # 使用视图优化查询
     result = crud.get_order_list(
         db, skip=skip, limit=page_size,
-        status=status, keyword=keyword
+        status=status, keyword=keyword,
+        use_view=True  # 启用视图优化
     )
     
-    return schemas.PageResponse(
-        data=[schemas.LeaseOrder.from_orm(item) for item in result["items"]],
-        total=result["total"],
-        page=page,
-        page_size=page_size
-    )
+    # 如果使用视图，需要转换为ORM对象格式
+    if result.get("items") and isinstance(result["items"][0], dict):
+        # 视图返回的是字典格式，需要转换为ORM对象或直接返回字典
+        # 为了兼容现有schema，我们返回字典格式，让前端直接使用
+        items = []
+        for item in result["items"]:
+            # 创建类似ORM对象的字典结构
+            order_dict = {
+                'order_id': item['order_id'],
+                'order_code': item['order_code'],
+                'customer_id': item['customer_id'],
+                'customer_name': item['customer_name'],
+                'voyage_no': item['voyage_no'],
+                'start_date': item['start_date'],
+                'expected_return_date': item['expected_return_date'],
+                'actual_return_date': item['actual_return_date'],
+                'status': item['order_status'],
+                'total_amount': item['total_amount'],
+                'created_by': item['created_by'],
+                'created_at': item['created_at'],
+                'updated_at': item['updated_at'],
+                'is_deleted': 0,
+                # 扩展信息（视图提供）
+                'equipment_count': item['equipment_count'],
+                'total_rental_days': item['total_rental_days'],
+                'contact_person': item['contact_person'],
+                'customer_phone': item['customer_phone'],
+                'billing_status': item['billing_status'],
+                'return_code': item['return_code'],
+            }
+            items.append(order_dict)
+        
+        # 使用字典创建PageResponse，需要调整schema或直接返回字典
+        return {
+            "data": items,
+            "total": result["total"],
+            "page": page,
+            "page_size": page_size
+        }
+    else:
+        # 兼容原有格式
+        return schemas.PageResponse(
+            data=[schemas.LeaseOrder.from_orm(item) for item in result["items"]],
+            total=result["total"],
+            page=page,
+            page_size=page_size
+        )
 
 
 @app.get("/api/orders/{order_id}", response_model=schemas.LeaseOrder, tags=["Order"])
@@ -1825,6 +2019,131 @@ def get_current_user_info(user_id: int = Query(..., description="用户ID"), db:
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     return user
+
+
+@app.post("/api/user/my-project/list", tags=["User"])
+def get_my_project_list(db: Session = Depends(get_db)):
+    """获取我的项目列表（装饰性数据）"""
+    # 返回系统项目信息
+    return {
+        "code": 200,
+        "message": "success",
+        "data": [
+            {
+                "id": 1,
+                "name": "港口装备管理系统",
+                "description": "船舶作业装备租赁与港口仓储管理系统",
+                "peopleNumber": db.query(func.count(models.User.user_id)).filter(
+                    models.User.is_deleted == 0,
+                    models.User.status == "active"
+                ).scalar() or 0,
+                "contributors": []
+            }
+        ]
+    }
+
+
+@app.post("/api/user/my-team/list", tags=["User"])
+def get_my_team_list(db: Session = Depends(get_db)):
+    """获取我的团队列表（装饰性数据）"""
+    # 按角色统计团队
+    teams = []
+    
+    # 管理团队
+    admin_count = db.query(func.count(models.User.user_id)).filter(
+        models.User.is_deleted == 0,
+        models.User.status == "active",
+        models.User.role == "admin"
+    ).scalar() or 0
+    
+    # 仓管团队
+    warehouse_count = db.query(func.count(models.User.user_id)).filter(
+        models.User.is_deleted == 0,
+        models.User.status == "active",
+        models.User.role == "warehouse"
+    ).scalar() or 0
+    
+    # 财务团队
+    finance_count = db.query(func.count(models.User.user_id)).filter(
+        models.User.is_deleted == 0,
+        models.User.status == "active",
+        models.User.role == "finance"
+    ).scalar() or 0
+    
+    # 操作团队
+    operator_count = db.query(func.count(models.User.user_id)).filter(
+        models.User.is_deleted == 0,
+        models.User.status == "active",
+        models.User.role == "operator"
+    ).scalar() or 0
+    
+    teams = [
+        {
+            "id": 1,
+            "avatar": "",
+            "name": "管理团队",
+            "peopleNumber": admin_count
+        },
+        {
+            "id": 2,
+            "avatar": "",
+            "name": "仓管团队",
+            "peopleNumber": warehouse_count
+        },
+        {
+            "id": 3,
+            "avatar": "",
+            "name": "财务团队",
+            "peopleNumber": finance_count
+        },
+        {
+            "id": 4,
+            "avatar": "",
+            "name": "操作团队",
+            "peopleNumber": operator_count
+        }
+    ]
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": teams
+    }
+
+
+@app.post("/api/user/latest-activity", tags=["User"])
+def get_latest_activity(db: Session = Depends(get_db)):
+    """获取最近活动（装饰性数据）"""
+    # 获取最近的操作日志
+    recent_logs = db.query(models.OperationLog).order_by(
+        models.OperationLog.created_at.desc()
+    ).limit(5).all()
+    
+    activities = []
+    for log in recent_logs:
+        activities.append({
+            "id": log.log_id,
+            "title": f"{log.username or '系统'} {log.action}",
+            "description": log.description or f"{log.action} {log.table_name}",
+            "avatar": ""
+        })
+    
+    # 如果没有日志，返回默认活动
+    if not activities:
+        activities = [
+            {
+                "id": 1,
+                "title": "系统初始化",
+                "description": "装备租赁管理系统已就绪",
+                "avatar": ""
+            }
+        ]
+    
+    return {
+        "code": 200,
+        "message": "success",
+        "data": activities
+    }
 
 
 @app.put("/api/user/info/{user_id}", response_model=schemas.User, tags=["User"])

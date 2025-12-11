@@ -47,17 +47,24 @@ export function getUserInfo(userId: number) {
   });
 }
 
+// 获取当前登录用户信息（从后端响应中获取）
+export function getCurrentUserInfo() {
+  return axios.get('/api/user/info');
+}
+
 export function updateUserInfo(userId: number, data: BasicInfoModel) {
   return axios.put(`/api/user/info/${userId}`, data);
 }
 
 export interface BasicInfoModel {
-  email: string;
-  nickname: string;
-  countryRegion: string;
-  area: string;
-  address: string;
-  profile: string;
+  email?: string;
+  nickname?: string;
+  countryRegion?: string;
+  area?: string;
+  address?: string;
+  profile?: string;
+  real_name?: string;
+  phone?: string;
 }
 
 export function userUploadApi(

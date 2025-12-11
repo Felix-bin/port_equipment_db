@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, field_serializer
 from typing import Optional, List
 from datetime import datetime, date
 from models import EquipmentStatus, OrderStatus, BillingStatus, InspectionResult
@@ -29,12 +29,53 @@ class EquipmentUpdate(BaseModel):
     specifications: Optional[str] = None
     remarks: Optional[str] = None
 
+    @field_validator('status', mode='before')
+    @classmethod
+    def parse_status(cls, v):
+        if v is None:
+            return v
+
+        # Handle both Chinese and English status values
+        status_mapping = {
+            "在库": EquipmentStatus.IN_STOCK,
+            "已出库": EquipmentStatus.OUT,
+            "维修中": EquipmentStatus.MAINTENANCE,
+            "已报废": EquipmentStatus.SCRAPPED,
+            "IN_STOCK": EquipmentStatus.IN_STOCK,
+            "OUT": EquipmentStatus.OUT,
+            "MAINTENANCE": EquipmentStatus.MAINTENANCE,
+            "SCRAPPED": EquipmentStatus.SCRAPPED,
+        }
+
+        if isinstance(v, str):
+            v_clean = v.strip()
+            if v_clean in status_mapping:
+                return status_mapping[v_clean]
+            # Try to convert directly to enum if it's a valid value
+            try:
+                return EquipmentStatus(v_clean)
+            except ValueError:
+                raise ValueError(f"Invalid status value: {v}. Valid values are: {list(status_mapping.keys())}")
+
+        return v
+
 
 class Equipment(EquipmentBase):
     equipment_id: int
     status: EquipmentStatus
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer('status')
+    def serialize_status(self, value: EquipmentStatus) -> str:
+        # Convert enum values back to Chinese for frontend compatibility
+        status_mapping = {
+            EquipmentStatus.IN_STOCK: "在库",
+            EquipmentStatus.OUT: "已出库",
+            EquipmentStatus.MAINTENANCE: "维修中",
+            EquipmentStatus.SCRAPPED: "已报废",
+        }
+        return status_mapping.get(value, str(value.value))
 
     class Config:
         from_attributes = True

@@ -1,188 +1,176 @@
 <template>
-  <a-card :bordered="false">
-    <a-space :size="54">
-      <a-upload
-        :custom-request="customRequest"
-        list-type="picture-card"
-        :file-list="fileList"
-        :show-upload-button="true"
-        :show-file-list="false"
-        @change="uploadChange"
-      >
-        <template #upload-button>
-          <a-avatar :size="100" class="info-avatar">
-            <template #trigger-icon>
-              <icon-camera />
-            </template>
-            <img v-if="fileList.length" :src="fileList[0].url" />
-          </a-avatar>
-        </template>
-      </a-upload>
-      <a-descriptions
-        :data="renderData"
-        :column="2"
-        align="right"
-        layout="inline-horizontal"
-        :label-style="{
-          width: '140px',
-          fontWeight: 'normal',
-          color: 'rgb(var(--gray-8))',
-        }"
-        :value-style="{
-          width: '200px',
-          paddingLeft: '8px',
-          textAlign: 'left',
-        }"
-      >
-        <template #label="{ label }">{{ $t(label) }} :</template>
-        <template #value="{ value }">
-          <span>{{ value }}</span>
-        </template>
-      </a-descriptions>
-    </a-space>
+  <a-card :bordered="false" class="user-panel-card">
+    <a-spin :loading="loading" style="width: 100%">
+      <div class="user-panel">
+        <div class="user-avatar-section">
+          <div class="avatar-wrapper">
+            <a-avatar :size="100" class="user-avatar">
+              <img v-if="userInfo.avatar" :src="getAvatarUrl(userInfo.avatar)" alt="avatar" />
+              <icon-user v-else />
+            </a-avatar>
+            <a-upload
+              :custom-request="handleUploadAvatar"
+              :show-file-list="false"
+              accept="image/*"
+            >
+              <template #upload-button>
+                <a-button type="text" class="upload-btn">
+                  <icon-camera />
+                  {{ $t('userSetting.label.uploadAvatar') }}
+                </a-button>
+              </template>
+            </a-upload>
+          </div>
+        </div>
+
+        <div class="user-info-section">
+          <div class="info-row">
+            <div class="info-label">{{ $t('userSetting.label.username') }}：</div>
+            <div class="info-value">{{ userInfo.username || '-' }}</div>
+          </div>
+          <div class="info-row">
+            <div class="info-label">{{ $t('userSetting.label.realName') }}：</div>
+            <div class="info-value">{{ userInfo.real_name || '-' }}</div>
+          </div>
+          <div class="info-row">
+            <div class="info-label">{{ $t('userSetting.label.role') }}：</div>
+            <div class="info-value">
+              <a-tag :color="getRoleColor(userInfo.role)">
+                {{ getRoleLabel(userInfo.role) }}
+              </a-tag>
+            </div>
+          </div>
+          <div class="info-row">
+            <div class="info-label">{{ $t('userSetting.label.status') }}：</div>
+            <div class="info-value">
+              <a-tag :color="userInfo.status === 'active' ? 'green' : 'red'">
+                {{ userInfo.status === 'active' ? $t('userSetting.status.active') : $t('userSetting.status.inactive') }}
+              </a-tag>
+            </div>
+          </div>
+          <div class="info-row">
+            <div class="info-label">{{ $t('userSetting.label.email') }}：</div>
+            <div class="info-value">{{ userInfo.email || '-' }}</div>
+          </div>
+          <div class="info-row">
+            <div class="info-label">{{ $t('userSetting.label.phone') }}：</div>
+            <div class="info-value">{{ userInfo.phone || '-' }}</div>
+          </div>
+        </div>
+      </div>
+    </a-spin>
   </a-card>
 </template>
 
 <script lang="ts" setup>
-  import { ref, onMounted, computed } from 'vue';
-  import type {
-    FileItem,
-    RequestOption,
-  } from '@arco-design/web-vue/es/upload/interfaces';
+  import { ref, onMounted } from 'vue';
+  import { Message } from '@arco-design/web-vue';
   import { useUserStore } from '@/store';
-  import { userUploadApi, getUserInfo } from '@/api/user-center';
-  import type { DescData } from '@arco-design/web-vue/es/descriptions/interface';
+  import { getUserInfo, userUploadApi } from '@/api/user-center';
+  import { getAvatarUrl } from '@/utils/image';
 
   const userStore = useUserStore();
+  const loading = ref(false);
   
-  // 动态计算头像URL
-  const avatarUrl = computed(() => {
-    if (userStore.avatar) {
-      // 如果是相对路径，添加后端地址
-      if (userStore.avatar.startsWith('/uploads')) {
-        return `http://127.0.0.1:8000${userStore.avatar}`;
-      }
-      return userStore.avatar;
-    }
-    return '';
+  const userInfo = ref({
+    username: '',
+    real_name: '',
+    role: '',
+    status: '',
+    email: '',
+    phone: '',
+    avatar: '',
+    nickname: '',
   });
-  
-  const file = computed(() => ({
-    uid: '-2',
-    name: 'avatar.png',
-    url: avatarUrl.value,
-  }));
-  
-  const renderData = computed(() => [
-    {
-      label: 'userSetting.label.name',
-      value: userStore.name,
-    },
-    {
-      label: 'userSetting.label.accountId',
-      value: userStore.accountId,
-    },
-    {
-      label: 'userSetting.label.phone',
-      value: userStore.phone,
-    },
-    {
-      label: 'userSetting.label.registrationDate',
-      value: userStore.registrationDate,
-    },
-  ] as DescData[]);
-  
-  const fileList = ref<FileItem[]>([file.value]);
-  
-  // 加载用户信息（包括头像）
+
+  // 获取角色颜色
+  const getRoleColor = (role: string) => {
+    const colorMap: Record<string, string> = {
+      admin: 'red',
+      warehouse: 'blue',
+      finance: 'green',
+      operator: 'orange',
+    };
+    return colorMap[role] || 'gray';
+  };
+
+  // 获取角色标签
+  const getRoleLabel = (role: string) => {
+    const labelMap: Record<string, string> = {
+      admin: '管理员',
+      warehouse: '仓管员',
+      finance: '财务',
+      operator: '操作员',
+    };
+    return labelMap[role] || role;
+  };
+
+  // 加载用户信息
   const loadUserInfo = async () => {
-    if (!userStore.accountId) return;
+    if (!userStore.accountId) {
+      Message.warning('未获取到用户ID，请重新登录');
+      return;
+    }
     
+    loading.value = true;
     try {
       const userId = parseInt(userStore.accountId);
       const response = await getUserInfo(userId);
       const userData = response?.data || response;
       
-      // 更新头像
-      if (userData.avatar) {
-        userStore.setInfo({ avatar: userData.avatar });
-        // 更新文件列表
-        fileList.value = [{
-          uid: '-2',
-          name: 'avatar.png',
-          url: avatarUrl.value,
-        }];
-      }
+      userInfo.value = {
+        username: userData.username || '',
+        real_name: userData.real_name || '',
+        role: userData.role || '',
+        status: userData.status || '',
+        email: userData.email || '',
+        phone: userData.phone || '',
+        avatar: userData.avatar || '',
+        nickname: userData.nickname || '',
+      };
     } catch (err) {
       console.error('加载用户信息失败:', err);
+      Message.error('加载用户信息失败: ' + (err.response?.data?.detail || err.message));
+    } finally {
+      loading.value = false;
     }
   };
-  const uploadChange = (fileItemList: FileItem[], fileItem: FileItem) => {
-    fileList.value = [fileItem];
-  };
-  
-  const customRequest = (options: RequestOption) => {
-    (async function requestWrap() {
-      const {
-        onProgress,
-        onError,
-        onSuccess,
-        fileItem,
-        name = 'file',
-      } = options;
-      
-      try {
-        // 验证用户ID
-        const userId = userStore.accountId ? parseInt(userStore.accountId) : undefined;
-        if (!userId) {
-          throw new Error('用户ID不存在，请先登录');
-        }
 
-        onProgress(10);
-        
-        // 构建 FormData
-        const formData = new FormData();
-        formData.append(name as string, fileItem.file as Blob);
-        formData.append('user_id', userId.toString());
-        
-        onProgress(20);
-        
-        // 调用上传API（不使用 onUploadProgress 以避免错误）
-        const res = await userUploadApi(formData);
-        
-        onProgress(80);
-        
-        // 更新store中的头像
-        const avatarUrl = res?.data?.data?.url || res?.data?.url;
-        if (avatarUrl) {
-          // 构建完整URL
-          const fullAvatarUrl = avatarUrl.startsWith('/uploads') 
-            ? `http://127.0.0.1:8000${avatarUrl}` 
-            : avatarUrl;
-          
-          userStore.setInfo({ avatar: avatarUrl }); // 保存相对路径到store
-          
-          // 更新文件列表中的URL（使用完整URL显示）
-          fileList.value = [{
-            uid: '-2',
-            name: 'avatar.png',
-            url: fullAvatarUrl,
-          }];
-        }
-        
-        onProgress(100);
-        onSuccess(res);
-      } catch (error: any) {
-        console.error('头像上传失败:', error);
-        onError(error);
-      }
-    })();
+  // 上传头像
+  const handleUploadAvatar = async (options: any) => {
+    const { fileItem, onSuccess, onError } = options;
     
-    return {
-      abort() {
-        // 简化的 abort 实现
-      },
-    };
+    if (!userStore.accountId) {
+      Message.warning('请先登录');
+      onError();
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append('file', fileItem.file);
+      formData.append('user_id', userStore.accountId);
+      
+      const response = await userUploadApi(formData);
+      const result = response?.data || response;
+      
+      // 后端返回格式: { code: 200, message: "上传成功", data: { url: "/uploads/avatars/xxx.jpg" } }
+      if (result.data?.url || result.url) {
+        const avatarUrl = result.data?.url || result.url;
+        userInfo.value.avatar = avatarUrl;
+        Message.success('头像上传成功');
+        onSuccess();
+        
+        // 刷新用户信息
+        await loadUserInfo();
+      } else {
+        throw new Error('上传失败');
+      }
+    } catch (err) {
+      console.error('上传头像失败:', err);
+      Message.error('上传头像失败');
+      onError();
+    }
   };
   
   // 页面加载时获取用户信息
@@ -192,19 +180,80 @@
 </script>
 
 <style scoped lang="less">
-  .arco-card {
-    padding: 14px 0 4px 4px;
-    border-radius: 4px;
+  .user-panel-card {
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+    transition: box-shadow 0.3s ease;
+    
+    &:hover {
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    }
   }
-  :deep(.arco-avatar-trigger-icon-button) {
-    width: 32px;
-    height: 32px;
-    line-height: 32px;
-    background-color: #e8f3ff;
-    .arco-icon-camera {
-      margin-top: 8px;
-      color: rgb(var(--arcoblue-6));
-      font-size: 14px;
+
+  .user-panel {
+    display: flex;
+    gap: 40px;
+    padding: 24px;
+    
+    @media (max-width: 768px) {
+      flex-direction: column;
+      gap: 24px;
+    }
+  }
+
+  .user-avatar-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    
+    .avatar-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      
+      .user-avatar {
+        background: linear-gradient(135deg, rgb(var(--primary-6)), rgb(var(--primary-4)));
+        font-size: 40px;
+        
+        img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+      }
+      
+      .upload-btn {
+        font-size: 12px;
+        color: rgb(var(--primary-6));
+        
+        &:hover {
+          background: var(--color-fill-2);
+        }
+      }
+    }
+  }
+
+  .user-info-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    
+    .info-row {
+      display: flex;
+      align-items: center;
+      
+      .info-label {
+        min-width: 100px;
+        font-weight: 500;
+        color: rgb(var(--gray-7));
+      }
+      
+      .info-value {
+        flex: 1;
+        color: rgb(var(--gray-10));
+      }
     }
   }
 </style>

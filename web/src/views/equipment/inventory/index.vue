@@ -487,6 +487,8 @@
             console.log(
               '设备数据:',
               item.equipmentCode,
+              '状态:',
+              item.status,
               '日租金:',
               item.dailyRate
             );

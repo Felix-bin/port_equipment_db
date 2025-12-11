@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Enum, Date
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, ForeignKey, Enum, Date, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -7,10 +7,10 @@ import enum
 
 # 枚举类型定义
 class EquipmentStatus(str, enum.Enum):
-    IN_STOCK = "在库"
-    OUT = "已出库"
-    MAINTENANCE = "维修中"
-    SCRAPPED = "已报废"
+    IN_STOCK = "IN_STOCK"
+    OUT = "OUT"
+    MAINTENANCE = "MAINTENANCE"
+    SCRAPPED = "SCRAPPED"
 
 
 class OrderStatus(str, enum.Enum):
@@ -92,8 +92,8 @@ class Equipment(Base):
     warranty_date = Column(Date)  # 质保期限
     last_maintenance_date = Column(Date)  # 最后维护日期
     serial_number = Column(String(100))  # 序列号
-    created_at = Column(DateTime, default=datetime.now, nullable=False)
-    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
+    created_at = Column(DateTime, default=datetime.now, server_default=text('CURRENT_TIMESTAMP'), nullable=False)
+    updated_at = Column(DateTime, default=datetime.now, server_default=text('CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'), onupdate=datetime.now, nullable=False)
     is_deleted = Column(Integer, default=0)
 
     # 关系

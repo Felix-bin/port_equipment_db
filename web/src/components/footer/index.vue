@@ -1,5 +1,5 @@
 <template>
-  <a-layout-footer class="footer">Arco Pro</a-layout-footer>
+  <a-layout-footer class="footer">船舶装备租赁管理系统</a-layout-footer>
 </template>
 
 <script lang="ts" setup></script>

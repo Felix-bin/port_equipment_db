@@ -4,10 +4,10 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 # 数据库连接信息
-DB_USER = 'root@mysql001'
-DB_PASSWORD = 'MySql123456.@'
+DB_USER = 'root'
+DB_PASSWORD = '123456'
 DB_HOST = '127.0.0.1'
-DB_PORT = 2881
+DB_PORT = 3306
 DB_NAME = 'port_equipment_db'
 
 # 对用户名和密码进行 URL 编码，处理特殊字符

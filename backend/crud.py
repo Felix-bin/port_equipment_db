@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
-from typing import List, Optional
+from sqlalchemy import func, and_, or_, text
+from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 import models
 import schemas
@@ -22,9 +22,16 @@ def get_equipment_list(
     limit: int = 10,
     keyword: Optional[str] = None,
     category: Optional[str] = None,
-    status: Optional[str] = None
+    status: Optional[str] = None,
+    use_view: bool = False
 ):
-    """获取设备列表"""
+    """
+    获取设备列表
+    如果 use_view=True，使用视图优化查询（包含租赁统计信息）
+    """
+    if use_view:
+        return get_equipment_list_from_view(db, skip, limit, keyword, category, status)
+    
     query = db.query(models.Equipment).filter(models.Equipment.is_deleted == 0)
     
     if keyword:
@@ -43,6 +50,121 @@ def get_equipment_list(
     items = query.order_by(models.Equipment.created_at.desc()).offset(skip).limit(limit).all()
     
     return {"total": total, "items": items}
+
+
+def get_equipment_list_from_view(
+    db: Session,
+    skip: int = 0,
+    limit: int = 10,
+    keyword: Optional[str] = None,
+    category: Optional[str] = None,
+    status: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    从视图获取设备库存列表（优化版本）
+    使用视图: v_equipment_inventory
+    如果视图不存在，自动回退到原查询方式
+    """
+    try:
+        query = "SELECT * FROM v_equipment_inventory WHERE 1=1"
+        params = {}
+        
+        if keyword:
+            query += " AND (equipment_code LIKE :keyword OR equipment_name LIKE :keyword)"
+            params['keyword'] = f'%{keyword}%'
+        
+        if category:
+            query += " AND category = :category"
+            params['category'] = category
+        
+        if status:
+            # 转换状态值
+            status_map = {
+                "在库": "在库",
+                "已出库": "已出库",
+                "维修中": "维修中",
+                "available": "在库",
+                "rented": "已出库",
+                "maintenance": "维修中"
+            }
+            status_value = status_map.get(status, status)
+            query += " AND status = :status"
+            params['status'] = status_value
+        
+        # 获取总数
+        count_query = query.replace("SELECT *", "SELECT COUNT(*)")
+        total = db.execute(text(count_query), params).scalar()
+        
+        # 获取分页数据
+        query += " ORDER BY created_at DESC LIMIT :limit OFFSET :skip"
+        params['limit'] = limit
+        params['skip'] = skip
+        
+        result = db.execute(text(query), params)
+        items = []
+        for row in result:
+            # 转换状态显示值 - 同时支持枚举名称和枚举值
+            status_display_map = {
+                # 枚举值映射
+                "在库": "available",
+                "已出库": "rented",
+                "维修中": "maintenance",
+                "已报废": "maintenance",
+                # 枚举名称映射（SQLAlchemy 可能返回枚举名称）
+                "IN_STOCK": "available",
+                "OUT": "rented",
+                "MAINTENANCE": "maintenance",
+                "SCRAPPED": "maintenance",
+            }
+            # 清理状态值（去除首尾空格）
+            raw_status = str(row.status).strip() if row.status else ""
+            display_status = status_display_map.get(raw_status, "maintenance")
+            
+            # 调试日志：如果状态不在映射中，记录警告
+            if raw_status not in status_display_map and raw_status:
+                print(f"警告: 设备 {row.equipment_code} 的状态值 '{raw_status}' 不在映射中，使用默认值 'maintenance'")
+            
+            items.append({
+                'equipment_id': row.equipment_id,
+                'equipment_code': row.equipment_code,
+                'equipment_name': row.equipment_name,
+                'category': row.category,
+                'status': row.status,
+                'storage_location': row.storage_location,
+                'purchase_price': float(row.purchase_price) if row.purchase_price else 0.0,
+                'daily_rental_rate': float(row.daily_rental_rate) if row.daily_rental_rate else 0.0,
+                'supplier': row.supplier or "",
+                'manufacturer': row.manufacturer or "",
+                'purchase_date': row.purchase_date,
+                'warranty_date': row.warranty_date,
+                'last_maintenance_date': row.last_maintenance_date,
+                'serial_number': row.serial_number or "",
+                'specifications': row.specifications or "",
+                'created_at': row.created_at,
+                'updated_at': row.updated_at,
+                # 视图提供的统计信息
+                'available_quantity': int(row.available_quantity),
+                'rented_quantity': int(row.rented_quantity),
+                'maintenance_quantity': int(row.maintenance_quantity),
+                'rental_count': int(row.rental_count),
+                'total_rental_days': int(row.total_rental_days),
+                'total_revenue': float(row.total_revenue) if row.total_revenue else 0.0,
+                # 前端需要的字段
+                'display_status': display_status,
+            })
+        
+        return {"total": total, "items": items}
+    except Exception as e:
+        # 视图不存在或其他错误，回退到原查询方式
+        import traceback
+        print(f"视图查询失败，回退到原查询方式: {e}")
+        traceback.print_exc()
+        # 调用原查询方法（禁用视图）
+        return get_equipment_list(
+            db, skip=skip, limit=limit,
+            keyword=keyword, category=category, status=status,
+            use_view=False  # 禁用视图，使用原查询
+        )
 
 
 def get_equipment_by_id(db: Session, equipment_id: int):
@@ -94,13 +216,95 @@ def update_equipment(db: Session, equipment_id: int, equipment: schemas.Equipmen
     if not db_equipment:
         return None
     
-    update_data = equipment.dict(exclude_unset=True)
+    # 使用 model_dump 替代 dict（Pydantic v2）或保持 dict（Pydantic v1）
+    try:
+        update_data = equipment.model_dump(exclude_unset=True)
+    except AttributeError:
+        # 兼容 Pydantic v1
+        update_data = equipment.dict(exclude_unset=True)
+    
+    # 移除系统字段，防止意外修改
+    system_fields = ['created_at', 'updated_at', 'equipment_id', 'equipment_code', 'is_deleted']
+    for field in system_fields:
+        update_data.pop(field, None)
+    
+    # 特殊处理状态字段，确保正确转换为枚举值
+    if 'status' in update_data and update_data['status'] is not None:
+        status_value = update_data['status']
+        # 如果传入的是字符串，尝试转换为枚举值
+        if isinstance(status_value, str):
+            status_map = {
+                "在库": models.EquipmentStatus.IN_STOCK,
+                "已出库": models.EquipmentStatus.OUT,
+                "维修中": models.EquipmentStatus.MAINTENANCE,
+                "已报废": models.EquipmentStatus.SCRAPPED,
+                "IN_STOCK": models.EquipmentStatus.IN_STOCK,
+                "OUT": models.EquipmentStatus.OUT,
+                "MAINTENANCE": models.EquipmentStatus.MAINTENANCE,
+                "SCRAPPED": models.EquipmentStatus.SCRAPPED,
+            }
+            cleaned_status = status_value.strip()
+            if cleaned_status in status_map:
+                update_data['status'] = status_map[cleaned_status]
+            else:
+                # 如果状态值不在映射中，尝试直接使用（可能是枚举值的字符串表示）
+                try:
+                    update_data['status'] = models.EquipmentStatus(cleaned_status)
+                except ValueError:
+                    raise ValueError(f"无效的设备状态值: '{status_value}'。有效值: {list(status_map.keys())}")
+        # 如果已经是枚举值，直接使用
+        elif isinstance(status_value, models.EquipmentStatus):
+            update_data['status'] = status_value
+        # 如果是枚举值的值（字符串），尝试转换
+        elif status_value in [e.value for e in models.EquipmentStatus]:
+            update_data['status'] = models.EquipmentStatus(status_value)
+    
+    # 更新字段
     for key, value in update_data.items():
         setattr(db_equipment, key, value)
     
-    db.commit()
-    db.refresh(db_equipment)
-    return db_equipment
+    # 提交更改并刷新对象
+    try:
+        db.commit()
+        db.refresh(db_equipment)
+        
+        # 调试日志：记录更新后的状态值
+        print(f"设备 {db_equipment.equipment_code} 更新成功，状态: {db_equipment.status} (类型: {type(db_equipment.status)}, 值: {db_equipment.status.value if hasattr(db_equipment.status, 'value') else db_equipment.status})")
+        
+        return db_equipment
+    except Exception as e:
+        db.rollback()
+        print(f"更新设备失败: {e}")
+        # 如果是 created_at 错误，尝试手动修复
+        if "created_at" in str(e):
+            print("尝试使用原始 SQL 更新...")
+            try:
+                # 使用原始 SQL 更新，避免触发 created_at 约束
+                update_stmt = text("""
+                    UPDATE equipment
+                    SET status = :status, updated_at = NOW()
+                    WHERE equipment_id = :equipment_id
+                """)
+                status_value = update_data.get('status')
+                if isinstance(status_value, models.EquipmentStatus):
+                    status_to_use = status_value.value
+                else:
+                    status_to_use = status_value
+                db.execute(update_stmt, {
+                    "status": status_to_use,
+                    "equipment_id": equipment_id
+                })
+                db.commit()
+                
+                # 重新查询设备
+                db_equipment = get_equipment_by_id(db, equipment_id)
+                print(f"使用原始 SQL 更新成功")
+                return db_equipment
+            except Exception as e2:
+                db.rollback()
+                print(f"原始 SQL 更新也失败: {e2}")
+                raise e
+        raise e
 
 
 def delete_equipment(db: Session, equipment_id: int):
@@ -115,8 +319,20 @@ def delete_equipment(db: Session, equipment_id: int):
 
 
 # ========== 客户管理 CRUD ==========
-def get_customer_list(db: Session, skip: int = 0, limit: int = 10, keyword: Optional[str] = None):
-    """获取客户列表"""
+def get_customer_list(
+    db: Session, 
+    skip: int = 0, 
+    limit: int = 10, 
+    keyword: Optional[str] = None,
+    use_view: bool = False
+):
+    """
+    获取客户列表
+    如果 use_view=True，使用视图优化查询（包含租赁统计信息）
+    """
+    if use_view:
+        return get_customer_list_from_view(db, skip, limit, keyword)
+    
     query = db.query(models.Customer).filter(models.Customer.is_deleted == 0)
     
     if keyword:
@@ -124,6 +340,65 @@ def get_customer_list(db: Session, skip: int = 0, limit: int = 10, keyword: Opti
     
     total = query.count()
     items = query.order_by(models.Customer.created_at.desc()).offset(skip).limit(limit).all()
+    
+    return {"total": total, "items": items}
+
+
+def get_customer_list_from_view(
+    db: Session,
+    skip: int = 0,
+    limit: int = 10,
+    keyword: Optional[str] = None,
+    credit_rating: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    从视图获取客户租赁统计列表（优化版本）
+    使用视图: v_customer_rental_stats
+    """
+    query = "SELECT * FROM v_customer_rental_stats WHERE 1=1"
+    params = {}
+    
+    if keyword:
+        query += " AND (customer_name LIKE :keyword OR contact_person LIKE :keyword)"
+        params['keyword'] = f'%{keyword}%'
+    
+    if credit_rating:
+        query += " AND credit_rating = :credit_rating"
+        params['credit_rating'] = credit_rating
+    
+    # 获取总数
+    count_query = query.replace("SELECT *", "SELECT COUNT(*)")
+    total = db.execute(text(count_query), params).scalar()
+    
+    # 获取分页数据
+    query += " ORDER BY total_rental_amount DESC LIMIT :limit OFFSET :skip"
+    params['limit'] = limit
+    params['skip'] = skip
+    
+    result = db.execute(text(query), params)
+    items = []
+    for row in result:
+        items.append({
+            'customer_id': row.customer_id,
+            'customer_name': row.customer_name,
+            'contact_person': row.contact_person,
+            'phone': row.phone,
+            'email': row.email,
+            'address': row.address,
+            'credit_rating': row.credit_rating,
+            'created_at': row.created_at,
+            # 视图提供的统计信息
+            'total_orders': int(row.total_orders),
+            'completed_orders': int(row.completed_orders),
+            'in_progress_orders': int(row.in_progress_orders),
+            'pending_orders': int(row.pending_orders),
+            'total_rental_amount': float(row.total_rental_amount),
+            'paid_amount': float(row.paid_amount),
+            'pending_amount': float(row.pending_amount),
+            'total_equipment_count': int(row.total_equipment_count),
+            'last_order_date': row.last_order_date,
+            'last_order_code': row.last_order_code,
+        })
     
     return {"total": total, "items": items}
 
@@ -143,9 +418,16 @@ def get_order_list(
     skip: int = 0,
     limit: int = 10,
     status: Optional[str] = None,
-    keyword: Optional[str] = None
+    keyword: Optional[str] = None,
+    use_view: bool = False
 ):
-    """获取订单列表"""
+    """
+    获取订单列表
+    如果 use_view=True，使用视图优化查询（包含客户、账单、归还等关联信息）
+    """
+    if use_view:
+        return get_order_list_from_view(db, skip, limit, status, keyword)
+    
     query = db.query(models.LeaseOrder).filter(models.LeaseOrder.is_deleted == 0)
     
     if status:
@@ -165,6 +447,80 @@ def get_order_list(
     return {"total": total, "items": items}
 
 
+def get_order_list_from_view(
+    db: Session,
+    skip: int = 0,
+    limit: int = 10,
+    status: Optional[str] = None,
+    keyword: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    从视图获取订单汇总列表（优化版本）
+    使用视图: v_order_summary
+    """
+    query = "SELECT * FROM v_order_summary WHERE 1=1"
+    params = {}
+    
+    if status:
+        query += " AND order_status = :status"
+        params['status'] = status
+    
+    if keyword:
+        query += " AND (order_code LIKE :keyword OR customer_name LIKE :keyword OR voyage_no LIKE :keyword)"
+        params['keyword'] = f'%{keyword}%'
+    
+    # 获取总数
+    count_query = query.replace("SELECT *", "SELECT COUNT(*)")
+    total = db.execute(text(count_query), params).scalar()
+    
+    # 获取分页数据
+    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :skip"
+    params['limit'] = limit
+    params['skip'] = skip
+    
+    result = db.execute(text(query), params)
+    items = []
+    for row in result:
+        items.append({
+            'order_id': row.order_id,
+            'order_code': row.order_code,
+            'customer_id': row.customer_id,
+            'customer_name': row.customer_name,
+            'contact_person': row.contact_person,
+            'customer_phone': row.customer_phone,
+            'customer_email': row.customer_email,
+            'credit_rating': row.credit_rating,
+            'voyage_no': row.voyage_no,
+            'start_date': row.start_date,
+            'expected_return_date': row.expected_return_date,
+            'actual_return_date': row.actual_return_date,
+            'order_status': row.order_status,
+            'total_amount': float(row.total_amount) if row.total_amount else 0.0,
+            'created_by': row.created_by,
+            'created_at': row.created_at,
+            'updated_at': row.updated_at,
+            # 视图提供的统计信息
+            'equipment_count': int(row.equipment_count),
+            'total_rental_days': int(row.total_rental_days),
+            'avg_daily_rate': float(row.avg_daily_rate) if row.avg_daily_rate else 0.0,
+            # 账单信息
+            'bill_id': row.bill_id,
+            'bill_code': row.bill_code,
+            'billing_status': row.billing_status,
+            'billing_amount': float(row.billing_amount) if row.billing_amount else 0.0,
+            'payment_method': row.payment_method,
+            'paid_amount': float(row.paid_amount) if row.paid_amount else 0.0,
+            # 归还信息
+            'return_id': row.return_id,
+            'return_code': row.return_code,
+            'return_date': row.return_date,
+            'inspection_status': row.inspection_status,
+            'total_damage_fee': float(row.total_damage_fee) if row.total_damage_fee else 0.0,
+        })
+    
+    return {"total": total, "items": items}
+
+
 def get_order_by_id(db: Session, order_id: int):
     """根据ID获取订单"""
     return db.query(models.LeaseOrder).filter(
@@ -174,36 +530,37 @@ def get_order_by_id(db: Session, order_id: int):
 
 
 def create_order(db: Session, order: schemas.LeaseOrderCreate):
-    """创建租赁订单"""
+    """
+    创建租赁订单
+    注意：订单总金额和设备状态更新由触发器自动处理
+    - trg_order_item_insert: 自动计算订单总金额
+    - trg_order_created: 自动更新设备状态为"已出库"
+    """
     # 生成订单编号
     order_code = f"ORD-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     
-    # 创建订单
+    # 创建订单（初始总金额设为0，触发器会自动计算）
     order_dict = order.dict(exclude={'order_items'})
-    db_order = models.LeaseOrder(**order_dict, order_code=order_code)
+    db_order = models.LeaseOrder(**order_dict, order_code=order_code, total_amount=0.0)
     db.add(db_order)
     db.flush()  # 获取 order_id
     
-    # 创建订单明细并计算总额
-    total_amount = 0.0
+    # 创建订单明细（触发器会自动计算订单总金额）
     for item in order.order_items:
         item_dict = item.dict()
+        # 计算小计
         subtotal = item_dict['daily_rate'] * item_dict['rental_days']
         item_dict['subtotal'] = subtotal
         item_dict['order_id'] = db_order.order_id
         
         db_item = models.OrderItem(**item_dict)
         db.add(db_item)
-        
-        total_amount += subtotal
-        
-        # 更新设备状态为已出库
-        db.query(models.Equipment).filter(
-            models.Equipment.equipment_id == item.equipment_id
-        ).update({"status": models.EquipmentStatus.OUT})
     
-    db_order.total_amount = total_amount
+    # 提交事务（触发器会在此时自动执行）
     db.commit()
+    db.refresh(db_order)
+    
+    # 重新查询以获取触发器计算后的总金额
     db.refresh(db_order)
     
     return db_order
@@ -230,9 +587,16 @@ def get_billing_list(
     skip: int = 0,
     limit: int = 10,
     status: Optional[str] = None,
-    keyword: Optional[str] = None
+    keyword: Optional[str] = None,
+    use_view: bool = False
 ):
-    """获取账单列表"""
+    """
+    获取账单列表
+    如果 use_view=True，使用视图优化查询（包含订单、客户等关联信息）
+    """
+    if use_view:
+        return get_billing_list_from_view(db, skip, limit, status, keyword)
+    
     query = db.query(models.Billing).filter(models.Billing.is_deleted == 0)
     
     if status:
@@ -251,14 +615,97 @@ def get_billing_list(
     return {"total": total, "items": items}
 
 
+def get_billing_list_from_view(
+    db: Session,
+    skip: int = 0,
+    limit: int = 10,
+    status: Optional[str] = None,
+    keyword: Optional[str] = None,
+    payment_method: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    从视图获取财务汇总列表（优化版本）
+    使用视图: v_billing_summary
+    """
+    query = "SELECT * FROM v_billing_summary WHERE 1=1"
+    params = {}
+    
+    if status:
+        query += " AND billing_status = :status"
+        params['status'] = status
+    
+    if keyword:
+        query += " AND (bill_code LIKE :keyword OR customer_name LIKE :keyword OR order_code LIKE :keyword)"
+        params['keyword'] = f'%{keyword}%'
+    
+    if payment_method:
+        query += " AND payment_method = :payment_method"
+        params['payment_method'] = payment_method
+    
+    # 获取总数
+    count_query = query.replace("SELECT *", "SELECT COUNT(*)")
+    total = db.execute(text(count_query), params).scalar()
+    
+    # 获取分页数据
+    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :skip"
+    params['limit'] = limit
+    params['skip'] = skip
+    
+    result = db.execute(text(query), params)
+    items = []
+    for row in result:
+        items.append({
+            'bill_id': row.bill_id,
+            'bill_code': row.bill_code,
+            'order_id': row.order_id,
+            'order_code': row.order_code,
+            'customer_name': row.customer_name,
+            'customer_id': row.customer_id,
+            'contact_person': row.contact_person,
+            'customer_phone': row.customer_phone,
+            'customer_email': row.customer_email,
+            'rental_fee': float(row.rental_fee) if row.rental_fee else 0.0,
+            'repair_fee': float(row.repair_fee) if row.repair_fee else 0.0,
+            'other_fee': float(row.other_fee) if row.other_fee else 0.0,
+            'discount': float(row.discount) if row.discount else 0.0,
+            'total_amount': float(row.total_amount) if row.total_amount else 0.0,
+            'paid_amount': float(row.paid_amount) if row.paid_amount else 0.0,
+            'unpaid_amount': float(row.unpaid_amount) if row.unpaid_amount else 0.0,
+            'status': row.billing_status,
+            'payment_method': row.payment_method,
+            'invoice_no': row.invoice_no,
+            'billing_date': row.billing_date,
+            'payment_date': row.payment_date,
+            'remarks': row.remarks,
+            'created_at': row.created_at,
+            'updated_at': row.updated_at,
+            # 订单信息
+            'voyage_no': row.voyage_no,
+            'start_date': row.start_date,
+            'expected_return_date': row.expected_return_date,
+            'actual_return_date': row.actual_return_date,
+            'order_status': row.order_status,
+            # 订单明细统计
+            'equipment_count': int(row.equipment_count),
+            'total_rental_days': int(row.total_rental_days),
+        })
+    
+    return {"total": total, "items": items}
+
+
 def create_billing(db: Session, billing: schemas.BillingCreate):
-    """创建账单"""
+    """
+    创建账单
+    注意：总金额计算由触发器 trg_billing_before_insert 自动处理
+    如果total_amount未提供或为0，触发器会自动计算：rental_fee + repair_fee + other_fee - discount
+    """
     bill_code = f"BILL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     
     billing_dict = billing.dict()
-    total_amount = billing_dict['rental_fee'] + billing_dict['repair_fee'] + billing_dict['other_fee']
-    billing_dict['total_amount'] = total_amount
     billing_dict['bill_code'] = bill_code
+    # 如果未提供total_amount，设为0，让触发器自动计算
+    if 'total_amount' not in billing_dict or billing_dict.get('total_amount') is None:
+        billing_dict['total_amount'] = 0.0
     
     db_billing = models.Billing(**billing_dict)
     db.add(db_billing)
@@ -268,7 +715,11 @@ def create_billing(db: Session, billing: schemas.BillingCreate):
 
 
 def update_billing(db: Session, bill_id: int, billing: schemas.BillingUpdate):
-    """更新账单"""
+    """
+    更新账单
+    注意：总金额重新计算由触发器 trg_billing_before_update 自动处理
+    当费用字段变更时，触发器会自动重新计算总金额
+    """
     db_billing = db.query(models.Billing).filter(
         models.Billing.bill_id == bill_id,
         models.Billing.is_deleted == 0
@@ -281,9 +732,7 @@ def update_billing(db: Session, bill_id: int, billing: schemas.BillingUpdate):
     for key, value in update_data.items():
         setattr(db_billing, key, value)
     
-    # 重新计算总额
-    db_billing.total_amount = db_billing.rental_fee + db_billing.repair_fee + db_billing.other_fee
-    
+    # 触发器会自动重新计算total_amount，无需手动计算
     db.commit()
     db.refresh(db_billing)
     return db_billing
@@ -291,7 +740,10 @@ def update_billing(db: Session, bill_id: int, billing: schemas.BillingUpdate):
 
 # ========== 归还与质检 CRUD ==========
 def create_return_record(db: Session, return_record: schemas.ReturnRecordCreate):
-    """创建归还记录"""
+    """
+    创建归还记录
+    注意：操作日志由触发器 trg_return_record_created 自动记录
+    """
     return_code = f"RET-{datetime.now().strftime('%Y%m%d%H%M%S')}"
     
     db_return = models.ReturnRecord(
@@ -304,8 +756,62 @@ def create_return_record(db: Session, return_record: schemas.ReturnRecordCreate)
     return db_return
 
 
+# ========== 触发器日志 CRUD ==========
+def get_trigger_logs(
+    db: Session,
+    skip: int = 0,
+    limit: int = 20,
+    log_type: Optional[str] = None,
+    trigger_name: Optional[str] = None,
+    table_name: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None
+) -> Dict[str, Any]:
+    """获取触发器日志列表"""
+    query = db.query(models.TriggerLog)
+    
+    if log_type:
+        query = query.filter(models.TriggerLog.log_type == log_type)
+    if trigger_name:
+        query = query.filter(models.TriggerLog.trigger_name.like(f'%{trigger_name}%'))
+    if table_name:
+        query = query.filter(models.TriggerLog.table_name == table_name)
+    if start_date:
+        query = query.filter(models.TriggerLog.created_at >= start_date)
+    if end_date:
+        query = query.filter(models.TriggerLog.created_at <= end_date)
+    
+    total = query.count()
+    items = query.order_by(models.TriggerLog.created_at.desc()).offset(skip).limit(limit).all()
+    
+    return {
+        "total": total,
+        "items": items
+    }
+
+
+def get_trigger_log_by_id(db: Session, log_id: int):
+    """根据ID获取触发器日志"""
+    return db.query(models.TriggerLog).filter(models.TriggerLog.id == log_id).first()
+
+
+def create_trigger_log(db: Session, log_data: schemas.TriggerLogCreate):
+    """创建触发器日志（通常由触发器自动调用）"""
+    db_log = models.TriggerLog(**log_data.dict())
+    db.add(db_log)
+    db.commit()
+    db.refresh(db_log)
+    return db_log
+
+
 def create_inspection_record(db: Session, inspection: schemas.InspectionRecordCreate):
-    """创建质检记录"""
+    """
+    创建质检记录
+    注意：设备状态更新由触发器 trg_inspection_record_created 自动处理
+    触发器会根据repair_needed和function_test自动更新设备状态：
+    - repair_needed=1 或 function_test='故障' → 设备状态='维修中'
+    - 否则 → 设备状态='在库'
+    """
     # 判断质检结果
     result = models.InspectionResult.PASS
     if inspection.repair_needed == 1 or inspection.function_test == "故障":
@@ -317,15 +823,7 @@ def create_inspection_record(db: Session, inspection: schemas.InspectionRecordCr
     )
     db.add(db_inspection)
     
-    # 更新设备状态
-    new_status = models.EquipmentStatus.IN_STOCK
-    if inspection.repair_needed == 1:
-        new_status = models.EquipmentStatus.MAINTENANCE
-    
-    db.query(models.Equipment).filter(
-        models.Equipment.equipment_id == inspection.equipment_id
-    ).update({"status": new_status})
-    
+    # 触发器会自动更新设备状态，无需手动更新
     db.commit()
     db.refresh(db_inspection)
     return db_inspection
@@ -531,47 +1029,79 @@ def get_rental_analysis_stats(db: Session):
     
     returned_growth = ((total_returned - yesterday_returned) / yesterday_returned * 100) if yesterday_returned > 0 else 0.0
     
-    # 5. 装备类型租赁比例（按设备类别统计订单数量）
-    category_stats = db.query(
-        models.Equipment.category,
-        func.count(models.OrderItem.item_id).label('count')
-    ).join(
-        models.OrderItem, models.OrderItem.equipment_id == models.Equipment.equipment_id
-    ).join(
-        models.LeaseOrder, models.LeaseOrder.order_id == models.OrderItem.order_id
-    ).filter(
-        models.Equipment.is_deleted == 0,
-        models.LeaseOrder.is_deleted == 0
-    ).group_by(models.Equipment.category).all()
+    # 5. 装备类型租赁比例（使用视图优化）
+    try:
+        # 尝试使用视图优化查询
+        category_stats = db.execute(text("""
+            SELECT category, total_rental_count as count
+            FROM v_equipment_category_stats
+            WHERE total_rental_count > 0
+            ORDER BY total_rental_count DESC
+        """)).fetchall()
+        category_ratio = [{"name": row.category, "value": int(row.count)} for row in category_stats]
+    except Exception:
+        # 如果视图不存在，使用原查询方式
+        category_stats = db.query(
+            models.Equipment.category,
+            func.count(models.OrderItem.item_id).label('count')
+        ).join(
+            models.OrderItem, models.OrderItem.equipment_id == models.Equipment.equipment_id
+        ).join(
+            models.LeaseOrder, models.LeaseOrder.order_id == models.OrderItem.order_id
+        ).filter(
+            models.Equipment.is_deleted == 0,
+            models.LeaseOrder.is_deleted == 0
+        ).group_by(models.Equipment.category).all()
+        category_ratio = [{"name": cat, "value": cnt} for cat, cnt in category_stats]
     
-    category_ratio = [{"name": cat, "value": cnt} for cat, cnt in category_stats]
-    
-    # 6. 热门租赁装备榜单（按租赁次数和天数排序）
-    popular_stats = db.query(
-        models.Equipment.equipment_name,
-        func.count(models.OrderItem.item_id).label('rental_count'),
-        func.sum(models.OrderItem.rental_days).label('rental_days')
-    ).join(
-        models.OrderItem, models.OrderItem.equipment_id == models.Equipment.equipment_id
-    ).join(
-        models.LeaseOrder, models.LeaseOrder.order_id == models.OrderItem.order_id
-    ).filter(
-        models.Equipment.is_deleted == 0,
-        models.LeaseOrder.is_deleted == 0
-    ).group_by(
-        models.Equipment.equipment_id, models.Equipment.equipment_name
-    ).order_by(
-        func.count(models.OrderItem.item_id).desc()
-    ).limit(10).all()
-    
-    popular_equipment = [
-        {
-            "equipment_name": name,
-            "rental_count": int(count),
-            "rental_days": int(days or 0)
-        }
-        for name, count, days in popular_stats
-    ]
+    # 6. 热门租赁装备榜单（使用视图优化）
+    try:
+        # 尝试使用视图优化查询
+        popular_stats = db.execute(text("""
+            SELECT 
+                equipment_name,
+                rental_count,
+                total_rental_days as rental_days
+            FROM v_equipment_usage
+            WHERE rental_count > 0
+            ORDER BY rental_count DESC, total_rental_days DESC
+            LIMIT 10
+        """)).fetchall()
+        popular_equipment = [
+            {
+                "equipment_name": row.equipment_name,
+                "rental_count": int(row.rental_count),
+                "rental_days": int(row.rental_days or 0)
+            }
+            for row in popular_stats
+        ]
+    except Exception:
+        # 如果视图不存在，使用原查询方式
+        popular_stats = db.query(
+            models.Equipment.equipment_name,
+            func.count(models.OrderItem.item_id).label('rental_count'),
+            func.sum(models.OrderItem.rental_days).label('rental_days')
+        ).join(
+            models.OrderItem, models.OrderItem.equipment_id == models.Equipment.equipment_id
+        ).join(
+            models.LeaseOrder, models.LeaseOrder.order_id == models.OrderItem.order_id
+        ).filter(
+            models.Equipment.is_deleted == 0,
+            models.LeaseOrder.is_deleted == 0
+        ).group_by(
+            models.Equipment.equipment_id, models.Equipment.equipment_name
+        ).order_by(
+            func.count(models.OrderItem.item_id).desc()
+        ).limit(10).all()
+        
+        popular_equipment = [
+            {
+                "equipment_name": name,
+                "rental_count": int(count),
+                "rental_days": int(days or 0)
+            }
+            for name, count, days in popular_stats
+        ]
     
     # 7. 租赁时段分析（按月份统计订单数量）
     # 生成最近12个月的月份列表
